@@ -24,8 +24,8 @@ import org.apache.flink.api.common.state.{MapState, MapStateDescriptor, ValueSta
 import org.apache.flink.api.common.typeinfo.{BasicTypeInfo, TypeInformation}
 import org.apache.flink.api.java.typeutils.{ListTypeInfo, RowTypeInfo}
 import org.apache.flink.configuration.Configuration
-import org.apache.flink.streaming.api.functions.ProcessFunction
-import org.apache.flink.table.api.StreamQueryConfig
+import org.apache.flink.streaming.api.functions.KeyedProcessFunction
+import org.apache.flink.table.api.TableConfig
 import org.apache.flink.table.codegen.{Compiler, GeneratedAggregationsFunction}
 import org.apache.flink.table.runtime.types.{CRow, CRowTypeInfo}
 import org.apache.flink.table.util.Logging
@@ -40,13 +40,14 @@ import org.apache.flink.util.{Collector, Preconditions}
   * @param aggregatesTypeInfo   row type info of aggregation
   * @param inputType            row type info of input row
   */
-class ProcTimeBoundedRowsOver(
+class ProcTimeBoundedRowsOver[K](
     genAggregations: GeneratedAggregationsFunction,
     precedingOffset: Long,
     aggregatesTypeInfo: RowTypeInfo,
     inputType: TypeInformation[CRow],
-    queryConfig: StreamQueryConfig)
-  extends ProcessFunctionWithCleanupState[CRow, CRow](queryConfig)
+    minRetentionTime: Long,
+    maxRetentionTime: Long)
+  extends ProcessFunctionWithCleanupState[K, CRow, CRow](minRetentionTime, maxRetentionTime)
     with Compiler[GeneratedAggregations]
     with Logging {
 
@@ -102,7 +103,7 @@ class ProcTimeBoundedRowsOver(
 
   override def processElement(
     inputC: CRow,
-    ctx: ProcessFunction[CRow, CRow]#Context,
+    ctx: KeyedProcessFunction[K, CRow, CRow]#Context,
     out: Collector[CRow]): Unit = {
 
     val input = inputC.row
@@ -184,7 +185,7 @@ class ProcTimeBoundedRowsOver(
 
   override def onTimer(
     timestamp: Long,
-    ctx: ProcessFunction[CRow, CRow]#OnTimerContext,
+    ctx: KeyedProcessFunction[K, CRow, CRow]#OnTimerContext,
     out: Collector[CRow]): Unit = {
 
     if (stateCleaningEnabled) {
@@ -194,6 +195,8 @@ class ProcTimeBoundedRowsOver(
   }
 
   override def close(): Unit = {
-    function.close()
+    if (function != null) {
+      function.close()
+    }
   }
 }

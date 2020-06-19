@@ -22,15 +22,15 @@ import java.lang.{Long => JLong}
 import org.apache.flink.api.common.state.{ValueState, ValueStateDescriptor}
 import org.apache.flink.api.common.state.State
 import org.apache.flink.streaming.api.TimeDomain
-import org.apache.flink.streaming.api.functions.ProcessFunction
-import org.apache.flink.table.api.{StreamQueryConfig, Types}
+import org.apache.flink.streaming.api.functions.KeyedProcessFunction
+import org.apache.flink.table.api.{TableConfig, Types}
 
-abstract class ProcessFunctionWithCleanupState[IN,OUT](queryConfig: StreamQueryConfig)
-  extends ProcessFunction[IN, OUT]
-  with CleanupState {
+abstract class ProcessFunctionWithCleanupState[KEY, IN,OUT](
+    minRetentionTime: Long,
+    maxRetentionTime: Long)
+  extends KeyedProcessFunction[KEY, IN, OUT]
+    with CleanupState {
 
-  protected val minRetentionTime: Long = queryConfig.getMinIdleStateRetentionTime
-  protected val maxRetentionTime: Long = queryConfig.getMaxIdleStateRetentionTime
   protected val stateCleaningEnabled: Boolean = minRetentionTime > 1
 
   // holds the latest registered cleanup timer
@@ -45,7 +45,7 @@ abstract class ProcessFunctionWithCleanupState[IN,OUT](queryConfig: StreamQueryC
   }
 
   protected def processCleanupTimer(
-    ctx: ProcessFunction[IN, OUT]#Context,
+    ctx: KeyedProcessFunction[KEY, IN, OUT]#Context,
     currentTime: Long): Unit = {
     if (stateCleaningEnabled) {
       registerProcessingCleanupTimer(

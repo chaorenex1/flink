@@ -47,7 +47,7 @@ public class TraversableSerializerSnapshot<T extends TraversableOnce<E>, E>
 
 	@SuppressWarnings("unused")
 	public TraversableSerializerSnapshot() {
-		super(serializerClass());
+		super(TraversableSerializer.class);
 	}
 
 	public TraversableSerializerSnapshot(TraversableSerializer<T, E> serializerInstance) {
@@ -56,7 +56,7 @@ public class TraversableSerializerSnapshot<T extends TraversableOnce<E>, E>
 	}
 
 	TraversableSerializerSnapshot(String cbfCode) {
-		super(serializerClass());
+		super(TraversableSerializer.class);
 		checkArgument(cbfCode != null, "cbfCode cannot be null");
 
 		this.cbfCode = cbfCode;
@@ -98,12 +98,9 @@ public class TraversableSerializerSnapshot<T extends TraversableOnce<E>, E>
 	}
 
 	@Override
-	protected boolean isOuterSnapshotCompatible(TraversableSerializer<T, E> newSerializer) {
-		return cbfCode.equals(newSerializer.cbfCode());
-	}
-
-	@SuppressWarnings({"unchecked"})
-	private static <T extends TraversableOnce<E>, E> Class<TraversableSerializer<T, E>> serializerClass() {
-		return (Class<TraversableSerializer<T, E>>) (Class<?>) TraversableSerializer.class;
+	protected CompositeTypeSerializerSnapshot.OuterSchemaCompatibility resolveOuterSchemaCompatibility(TraversableSerializer<T, E> newSerializer) {
+		return (cbfCode.equals(newSerializer.cbfCode()))
+			? OuterSchemaCompatibility.COMPATIBLE_AS_IS
+			: OuterSchemaCompatibility.INCOMPATIBLE;
 	}
 }

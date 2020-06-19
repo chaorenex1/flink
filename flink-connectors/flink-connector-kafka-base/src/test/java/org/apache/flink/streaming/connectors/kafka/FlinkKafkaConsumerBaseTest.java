@@ -18,13 +18,19 @@
 
 package org.apache.flink.streaming.connectors.kafka;
 
+import org.apache.flink.api.common.ExecutionConfig;
+import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.state.BroadcastState;
 import org.apache.flink.api.common.state.KeyedStateStore;
 import org.apache.flink.api.common.state.ListState;
 import org.apache.flink.api.common.state.ListStateDescriptor;
 import org.apache.flink.api.common.state.MapStateDescriptor;
 import org.apache.flink.api.common.state.OperatorStateStore;
+import org.apache.flink.api.common.typeinfo.TypeHint;
+import org.apache.flink.api.common.typeinfo.TypeInformation;
+import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.api.java.typeutils.runtime.TupleSerializer;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.core.testutils.CheckedThread;
 import org.apache.flink.core.testutils.OneShotLatch;
@@ -43,6 +49,7 @@ import org.apache.flink.streaming.connectors.kafka.config.OffsetCommitMode;
 import org.apache.flink.streaming.connectors.kafka.internals.AbstractFetcher;
 import org.apache.flink.streaming.connectors.kafka.internals.AbstractPartitionDiscoverer;
 import org.apache.flink.streaming.connectors.kafka.internals.KafkaCommitCallback;
+import org.apache.flink.streaming.connectors.kafka.internals.KafkaDeserializationSchemaWrapper;
 import org.apache.flink.streaming.connectors.kafka.internals.KafkaTopicPartition;
 import org.apache.flink.streaming.connectors.kafka.internals.KafkaTopicsDescriptor;
 import org.apache.flink.streaming.connectors.kafka.testutils.TestPartitionDiscoverer;
@@ -50,10 +57,12 @@ import org.apache.flink.streaming.connectors.kafka.testutils.TestSourceContext;
 import org.apache.flink.streaming.runtime.tasks.ProcessingTimeService;
 import org.apache.flink.streaming.runtime.tasks.TestProcessingTimeService;
 import org.apache.flink.streaming.util.AbstractStreamOperatorTestHarness;
+import org.apache.flink.streaming.util.MockDeserializationSchema;
 import org.apache.flink.streaming.util.MockStreamingRuntimeContext;
 import org.apache.flink.streaming.util.serialization.KeyedDeserializationSchema;
 import org.apache.flink.util.ExceptionUtils;
 import org.apache.flink.util.FlinkException;
+import org.apache.flink.util.InstantiationUtil;
 import org.apache.flink.util.Preconditions;
 import org.apache.flink.util.SerializedValue;
 import org.apache.flink.util.TestLogger;
@@ -77,6 +86,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.stream.Collectors;
 
 import static org.apache.flink.util.Preconditions.checkState;
 import static org.hamcrest.Matchers.everyItem;
@@ -98,6 +108,8 @@ import static org.mockito.Mockito.mock;
  * Tests for the {@link FlinkKafkaConsumerBase}.
  */
 public class FlinkKafkaConsumerBaseTest extends TestLogger {
+
+	private static final int maxParallelism = Short.MAX_VALUE / 2;
 
 	/**
 	 * Tests that not both types of timestamp extractors / watermark generators can be used.
@@ -248,6 +260,124 @@ public class FlinkKafkaConsumerBaseTest extends TestLogger {
 		setupConsumer(consumer);
 
 		assertEquals(OffsetCommitMode.DISABLED, consumer.getOffsetCommitMode());
+	}
+
+	/**
+	 * Tests that subscribed partitions didn't change when there's no change
+	 * on the intial topics. (filterRestoredPartitionsWithDiscovered is active)
+	 */
+	@Test
+	public void testSetFilterRestoredParitionsNoChange() throws Exception {
+		checkFilterRestoredPartitionsWithDisovered(
+			Arrays.asList(new String[]{"kafka_topic_1", "kafka_topic_2"}),
+			Arrays.asList(new String[]{"kafka_topic_1", "kafka_topic_2"}),
+			Arrays.asList(new String[]{"kafka_topic_1", "kafka_topic_2"}),
+			false);
+	}
+
+	/**
+	 * Tests that removed partitions will be removed from subscribed partitions
+	 * Even if it's still in restored partitions.
+	 * (filterRestoredPartitionsWithDiscovered is active)
+	 */
+	@Test
+	public void testSetFilterRestoredParitionsWithRemovedTopic() throws Exception {
+		checkFilterRestoredPartitionsWithDisovered(
+			Arrays.asList(new String[]{"kafka_topic_1", "kafka_topic_2"}),
+			Arrays.asList(new String[]{"kafka_topic_1"}),
+			Arrays.asList(new String[]{"kafka_topic_1"}),
+			false);
+	}
+
+	/**
+	 * Tests that newly added partitions will be added to subscribed partitions.
+	 * (filterRestoredPartitionsWithDiscovered is active)
+	 */
+	@Test
+	public void testSetFilterRestoredParitionsWithAddedTopic() throws Exception {
+		checkFilterRestoredPartitionsWithDisovered(
+			Arrays.asList(new String[]{"kafka_topic_1"}),
+			Arrays.asList(new String[]{"kafka_topic_1", "kafka_topic_2"}),
+			Arrays.asList(new String[]{"kafka_topic_1", "kafka_topic_2"}),
+			false);
+	}
+
+	/**
+	 * Tests that subscribed partitions are the same when there's no
+	 * change on the intial topics.
+	 * (filterRestoredPartitionsWithDiscovered is disabled)
+	 */
+	@Test
+	public void testDisableFilterRestoredParitionsNoChange() throws Exception {
+		checkFilterRestoredPartitionsWithDisovered(
+			Arrays.asList(new String[]{"kafka_topic_1", "kafka_topic_2"}),
+			Arrays.asList(new String[]{"kafka_topic_1", "kafka_topic_2"}),
+			Arrays.asList(new String[]{"kafka_topic_1", "kafka_topic_2"}),
+			true);
+	}
+
+	/**
+	 * Tests that removed partitions will not be removed from subscribed partitions
+	 * Even if it's still in restored partitions.
+	 * (filterRestoredPartitionsWithDiscovered is disabled)
+	 */
+	@Test
+	public void testDisableFilterRestoredParitionsWithRemovedTopic() throws Exception {
+		checkFilterRestoredPartitionsWithDisovered(
+			Arrays.asList(new String[]{"kafka_topic_1", "kafka_topic_2"}),
+			Arrays.asList(new String[]{"kafka_topic_1"}),
+			Arrays.asList(new String[]{"kafka_topic_1", "kafka_topic_2"}),
+			true);
+	}
+
+	/**
+	 * Tests that newly added partitions will be added to subscribed partitions.
+	 * (filterRestoredPartitionsWithDiscovered is disabled)
+	 */
+	@Test
+	public void testDisableFilterRestoredParitionsWithAddedTopic() throws Exception {
+		checkFilterRestoredPartitionsWithDisovered(
+			Arrays.asList(new String[]{"kafka_topic_1"}),
+			Arrays.asList(new String[]{"kafka_topic_1", "kafka_topic_2"}),
+			Arrays.asList(new String[]{"kafka_topic_1", "kafka_topic_2"}),
+			true);
+	}
+
+	private void checkFilterRestoredPartitionsWithDisovered(
+			List<String> restoredKafkaTopics,
+			List<String> initKafkaTopics,
+			List<String> expectedSubscribedPartitions,
+			Boolean disableFiltering) throws Exception {
+		final AbstractPartitionDiscoverer discoverer = new TestPartitionDiscoverer(
+			new KafkaTopicsDescriptor(initKafkaTopics, null),
+			0,
+			1,
+			TestPartitionDiscoverer.createMockGetAllTopicsSequenceFromFixedReturn(initKafkaTopics),
+			TestPartitionDiscoverer.createMockGetAllPartitionsFromTopicsSequenceFromFixedReturn(
+				initKafkaTopics.stream()
+					.map(topic -> new KafkaTopicPartition(topic, 0))
+					.collect(Collectors.toList())));
+		final FlinkKafkaConsumerBase<String> consumer = new DummyFlinkKafkaConsumer<>(initKafkaTopics, discoverer);
+		if (disableFiltering) {
+			consumer.disableFilterRestoredPartitionsWithSubscribedTopics();
+		}
+
+		final TestingListState<Tuple2<KafkaTopicPartition, Long>> listState = new TestingListState<>();
+
+		for (int i = 0; i < restoredKafkaTopics.size(); i++) {
+			listState.add(new Tuple2<>(new KafkaTopicPartition(restoredKafkaTopics.get(i), 0), 12345L));
+		}
+
+		setupConsumer(consumer, true, listState, true, 0, 1);
+
+		Map<KafkaTopicPartition, Long> subscribedPartitionsToStartOffsets = consumer.getSubscribedPartitionsToStartOffsets();
+
+		assertEquals(new HashSet<>(expectedSubscribedPartitions),
+			subscribedPartitionsToStartOffsets
+				.keySet()
+				.stream()
+				.map(partition -> partition.getTopic())
+				.collect(Collectors.toSet()));
 	}
 
 	@Test
@@ -545,6 +675,38 @@ public class FlinkKafkaConsumerBaseTest extends TestLogger {
 			1);
 	}
 
+	/**
+	 * Before using an explicit TypeSerializer for the partition state the {@link
+	 * FlinkKafkaConsumerBase} was creating a serializer using a {@link TypeHint}. Here, we verify
+	 * that the two methods create compatible serializers.
+	 */
+	@Test
+	public void testExplicitStateSerializerCompatibility() throws Exception {
+		ExecutionConfig executionConfig = new ExecutionConfig();
+
+		Tuple2<KafkaTopicPartition, Long> tuple =
+				new Tuple2<>(new KafkaTopicPartition("dummy", 0), 42L);
+
+		// This is how the KafkaConsumerBase used to create the TypeSerializer
+		TypeInformation<Tuple2<KafkaTopicPartition, Long>> originalTypeHintTypeInfo =
+				new TypeHint<Tuple2<KafkaTopicPartition, Long>>() {}.getTypeInfo();
+		TypeSerializer<Tuple2<KafkaTopicPartition, Long>> serializerFromTypeHint =
+				originalTypeHintTypeInfo.createSerializer(executionConfig);
+		byte[] bytes = InstantiationUtil.serializeToByteArray(serializerFromTypeHint, tuple);
+
+		// Directly use the Consumer to create the TypeSerializer (using the new method)
+		TupleSerializer<Tuple2<KafkaTopicPartition, Long>> kafkaConsumerSerializer =
+				FlinkKafkaConsumerBase.createStateSerializer(executionConfig);
+		Tuple2<KafkaTopicPartition, Long> actualTuple =
+				InstantiationUtil.deserializeFromByteArray(kafkaConsumerSerializer, bytes);
+
+		Assert.assertEquals(
+				"Explicit Serializer is not compatible with previous method of creating Serializer using TypeHint.",
+				tuple,
+				actualTuple
+		);
+	}
+
 	@Test
 	public void testScaleUp() throws Exception {
 		testRescaling(5, 2, 8, 30);
@@ -584,15 +746,17 @@ public class FlinkKafkaConsumerBaseTest extends TestLogger {
 		AbstractStreamOperatorTestHarness<String>[] testHarnesses =
 			new AbstractStreamOperatorTestHarness[initialParallelism];
 
+		List<String> testTopics = Collections.singletonList("test-topic");
+
 		for (int i = 0; i < initialParallelism; i++) {
 			TestPartitionDiscoverer partitionDiscoverer = new TestPartitionDiscoverer(
-				new KafkaTopicsDescriptor(Collections.singletonList("test-topic"), null),
+				new KafkaTopicsDescriptor(testTopics, null),
 				i,
 				initialParallelism,
-				TestPartitionDiscoverer.createMockGetAllTopicsSequenceFromFixedReturn(Collections.singletonList("test-topic")),
+				TestPartitionDiscoverer.createMockGetAllTopicsSequenceFromFixedReturn(testTopics),
 				TestPartitionDiscoverer.createMockGetAllPartitionsFromTopicsSequenceFromFixedReturn(mockFetchedPartitionsOnStartup));
 
-			consumers[i] = new DummyFlinkKafkaConsumer<>(mock(AbstractFetcher.class), partitionDiscoverer, false);
+			consumers[i] = new DummyFlinkKafkaConsumer<>(testTopics, partitionDiscoverer);
 			testHarnesses[i] = createTestHarness(consumers[i], initialParallelism, i);
 
 			// initializeState() is always called, null signals that we didn't restore
@@ -639,18 +803,21 @@ public class FlinkKafkaConsumerBaseTest extends TestLogger {
 			new AbstractStreamOperatorTestHarness[restoredParallelism];
 
 		for (int i = 0; i < restoredParallelism; i++) {
+			OperatorSubtaskState initState = AbstractStreamOperatorTestHarness.repartitionOperatorState(
+				mergedState, maxParallelism, initialParallelism, restoredParallelism, i);
+
 			TestPartitionDiscoverer partitionDiscoverer = new TestPartitionDiscoverer(
-				new KafkaTopicsDescriptor(Collections.singletonList("test-topic"), null),
+				new KafkaTopicsDescriptor(testTopics, null),
 				i,
 				restoredParallelism,
-				TestPartitionDiscoverer.createMockGetAllTopicsSequenceFromFixedReturn(Collections.singletonList("test-topic")),
+				TestPartitionDiscoverer.createMockGetAllTopicsSequenceFromFixedReturn(testTopics),
 				TestPartitionDiscoverer.createMockGetAllPartitionsFromTopicsSequenceFromFixedReturn(mockFetchedPartitionsAfterRestore));
 
-			restoredConsumers[i] = new DummyFlinkKafkaConsumer<>(mock(AbstractFetcher.class), partitionDiscoverer, false);
+			restoredConsumers[i] = new DummyFlinkKafkaConsumer<>(testTopics, partitionDiscoverer);
 			restoredTestHarnesses[i] = createTestHarness(restoredConsumers[i], restoredParallelism, i);
 
 			// initializeState() is always called, null signals that we didn't restore
-			restoredTestHarnesses[i].initializeState(mergedState);
+			restoredTestHarnesses[i].initializeState(initState);
 			restoredTestHarnesses[i].open();
 		}
 
@@ -671,6 +838,20 @@ public class FlinkKafkaConsumerBaseTest extends TestLogger {
 		assertThat(mockFetchedPartitionsOnStartup, everyItem(isIn(restoredGlobalSubscribedPartitions.keySet())));
 	}
 
+	@Test
+	public void testOpen() throws Exception {
+		MockDeserializationSchema<Object> deserializationSchema = new MockDeserializationSchema<>();
+
+		AbstractStreamOperatorTestHarness<Object> testHarness = createTestHarness(
+			new DummyFlinkKafkaConsumer<>(new KafkaDeserializationSchemaWrapper<>(deserializationSchema)),
+			1,
+			0
+		);
+
+		testHarness.open();
+		assertThat("Open method was not called", deserializationSchema.isOpenCalled(), is(true));
+	}
+
 	// ------------------------------------------------------------------------
 
 	private static <T> AbstractStreamOperatorTestHarness<T> createTestHarness(
@@ -678,7 +859,7 @@ public class FlinkKafkaConsumerBaseTest extends TestLogger {
 
 		AbstractStreamOperatorTestHarness<T> testHarness =
 			new AbstractStreamOperatorTestHarness<>(
-				new StreamSource<>(source), Short.MAX_VALUE / 2, numSubtasks, subtaskIndex);
+				new StreamSource<>(source), maxParallelism, numSubtasks, subtaskIndex);
 
 		testHarness.setTimeCharacteristic(TimeCharacteristic.EventTime);
 
@@ -810,8 +991,24 @@ public class FlinkKafkaConsumerBaseTest extends TestLogger {
 
 		private volatile boolean isRunning = true;
 
-		protected TestingFetcher(SourceFunction.SourceContext<T> sourceContext, Map<KafkaTopicPartition, Long> seedPartitionsWithInitialOffsets, SerializedValue<AssignerWithPeriodicWatermarks<T>> watermarksPeriodic, SerializedValue<AssignerWithPunctuatedWatermarks<T>> watermarksPunctuated, ProcessingTimeService processingTimeProvider, long autoWatermarkInterval, ClassLoader userCodeClassLoader, MetricGroup consumerMetricGroup, boolean useMetrics) throws Exception {
-			super(sourceContext, seedPartitionsWithInitialOffsets, watermarksPeriodic, watermarksPunctuated, processingTimeProvider, autoWatermarkInterval, userCodeClassLoader, consumerMetricGroup, useMetrics);
+		protected TestingFetcher(
+				SourceFunction.SourceContext<T> sourceContext,
+				Map<KafkaTopicPartition, Long> seedPartitionsWithInitialOffsets,
+				SerializedValue<WatermarkStrategy<T>> watermarkStrategy,
+				ProcessingTimeService processingTimeProvider,
+				long autoWatermarkInterval,
+				ClassLoader userCodeClassLoader,
+				MetricGroup consumerMetricGroup,
+				boolean useMetrics) throws Exception {
+			super(
+					sourceContext,
+					seedPartitionsWithInitialOffsets,
+					watermarkStrategy,
+					processingTimeProvider,
+					autoWatermarkInterval,
+					userCodeClassLoader,
+					consumerMetricGroup,
+					useMetrics);
 		}
 
 		@Override
@@ -865,8 +1062,37 @@ public class FlinkKafkaConsumerBaseTest extends TestLogger {
 		}
 
 		@SuppressWarnings("unchecked")
-		DummyFlinkKafkaConsumer(SupplierWithException<AbstractFetcher<T, ?>, Exception> abstractFetcherSupplier, AbstractPartitionDiscoverer abstractPartitionDiscoverer, long discoveryIntervalMillis) {
-			this(abstractFetcherSupplier, abstractPartitionDiscoverer, false, discoveryIntervalMillis);
+		DummyFlinkKafkaConsumer(KafkaDeserializationSchema<T> kafkaDeserializationSchema) {
+			this(
+				() -> mock(AbstractFetcher.class),
+				mock(AbstractPartitionDiscoverer.class),
+				false,
+				PARTITION_DISCOVERY_DISABLED,
+				Collections.singletonList("dummy-topic"),
+				kafkaDeserializationSchema);
+		}
+
+		@SuppressWarnings("unchecked")
+		DummyFlinkKafkaConsumer(List<String> topics, AbstractPartitionDiscoverer abstractPartitionDiscoverer) {
+			this(
+				() -> mock(AbstractFetcher.class),
+				abstractPartitionDiscoverer,
+				false,
+				PARTITION_DISCOVERY_DISABLED,
+				topics,
+				(KeyedDeserializationSchema<T>) mock(KeyedDeserializationSchema.class));
+		}
+
+		@SuppressWarnings("unchecked")
+		DummyFlinkKafkaConsumer(
+				SupplierWithException<AbstractFetcher<T, ?>, Exception> abstractFetcherSupplier,
+				AbstractPartitionDiscoverer abstractPartitionDiscoverer,
+				long discoveryIntervalMillis) {
+			this(
+					abstractFetcherSupplier,
+					abstractPartitionDiscoverer,
+					false,
+					discoveryIntervalMillis);
 		}
 
 		@SuppressWarnings("unchecked")
@@ -900,13 +1126,31 @@ public class FlinkKafkaConsumerBaseTest extends TestLogger {
 				AbstractPartitionDiscoverer testPartitionDiscoverer,
 				boolean isAutoCommitEnabled,
 				long discoveryIntervalMillis) {
+			this(
+				testFetcherSupplier,
+				testPartitionDiscoverer,
+				isAutoCommitEnabled,
+				discoveryIntervalMillis,
+				Collections.singletonList("dummy-topic"),
+				(KeyedDeserializationSchema<T>) mock(KeyedDeserializationSchema.class)
+			);
+		}
+
+		@SuppressWarnings("unchecked")
+		DummyFlinkKafkaConsumer(
+			SupplierWithException<AbstractFetcher<T, ?>, Exception> testFetcherSupplier,
+			AbstractPartitionDiscoverer testPartitionDiscoverer,
+			boolean isAutoCommitEnabled,
+			long discoveryIntervalMillis,
+			List<String> topics,
+			KafkaDeserializationSchema<T> mock) {
 
 			super(
-					Collections.singletonList("dummy-topic"),
-					null,
-					(KeyedDeserializationSchema < T >) mock(KeyedDeserializationSchema.class),
-					discoveryIntervalMillis,
-					false);
+				topics,
+				null,
+				mock,
+				discoveryIntervalMillis,
+				false);
 
 			this.testFetcherSupplier = testFetcherSupplier;
 			this.testPartitionDiscoverer = testPartitionDiscoverer;
@@ -914,12 +1158,10 @@ public class FlinkKafkaConsumerBaseTest extends TestLogger {
 		}
 
 		@Override
-		@SuppressWarnings("unchecked")
 		protected AbstractFetcher<T, ?> createFetcher(
 				SourceContext<T> sourceContext,
 				Map<KafkaTopicPartition, Long> thisSubtaskPartitionsWithStartOffsets,
-				SerializedValue<AssignerWithPeriodicWatermarks<T>> watermarksPeriodic,
-				SerializedValue<AssignerWithPunctuatedWatermarks<T>> watermarksPunctuated,
+				SerializedValue<WatermarkStrategy<T>> watermarkStrategy,
 				StreamingRuntimeContext runtimeContext,
 				OffsetCommitMode offsetCommitMode,
 				MetricGroup consumerMetricGroup,
@@ -957,16 +1199,30 @@ public class FlinkKafkaConsumerBaseTest extends TestLogger {
 		TestingFlinkKafkaConsumer(final AbstractPartitionDiscoverer partitionDiscoverer, long discoveryIntervalMillis) {
 			super(Collections.singletonList("dummy-topic"),
 				null,
-				(KeyedDeserializationSchema < T >) mock(KeyedDeserializationSchema.class),
+				(KafkaDeserializationSchema < T >) mock(KafkaDeserializationSchema.class),
 				discoveryIntervalMillis,
 				false);
 			this.partitionDiscoverer = partitionDiscoverer;
 		}
 
 		@Override
-		protected AbstractFetcher<T, ?> createFetcher(SourceContext<T> sourceContext, Map<KafkaTopicPartition, Long> thisSubtaskPartitionsWithStartOffsets, SerializedValue<AssignerWithPeriodicWatermarks<T>> watermarksPeriodic, SerializedValue<AssignerWithPunctuatedWatermarks<T>> watermarksPunctuated, StreamingRuntimeContext runtimeContext, OffsetCommitMode offsetCommitMode, MetricGroup consumerMetricGroup, boolean useMetrics) throws Exception {
-			return new TestingFetcher<T, String>(sourceContext, thisSubtaskPartitionsWithStartOffsets, watermarksPeriodic, watermarksPunctuated, runtimeContext.getProcessingTimeService(), 0L, getClass().getClassLoader(), consumerMetricGroup, useMetrics);
-
+		protected AbstractFetcher<T, ?> createFetcher(
+				SourceContext<T> sourceContext,
+				Map<KafkaTopicPartition, Long> thisSubtaskPartitionsWithStartOffsets,
+				SerializedValue<WatermarkStrategy<T>> watermarkStrategy,
+				StreamingRuntimeContext runtimeContext,
+				OffsetCommitMode offsetCommitMode,
+				MetricGroup consumerMetricGroup,
+				boolean useMetrics) throws Exception {
+			return new TestingFetcher<T, String>(
+					sourceContext,
+					thisSubtaskPartitionsWithStartOffsets,
+					watermarkStrategy,
+					runtimeContext.getProcessingTimeService(),
+					0L,
+					getClass().getClassLoader(),
+					consumerMetricGroup,
+					useMetrics);
 		}
 
 		@Override
@@ -1062,8 +1318,7 @@ public class FlinkKafkaConsumerBaseTest extends TestLogger {
 			super(
 					new TestSourceContext<>(),
 					new HashMap<>(),
-					null,
-					null,
+					null /* watermark strategy */,
 					new TestProcessingTimeService(),
 					0,
 					MockFetcher.class.getClassLoader(),
@@ -1131,19 +1386,6 @@ public class FlinkKafkaConsumerBaseTest extends TestLogger {
 		@SuppressWarnings("unchecked")
 		public <S> ListState<S> getUnionListState(ListStateDescriptor<S> stateDescriptor) throws Exception {
 			return (ListState<S>) mockRestoredUnionListState;
-		}
-
-		@Override
-		public <T extends Serializable> ListState<T> getSerializableListState(String stateName) throws Exception {
-			// return empty state for the legacy 1.2 Kafka consumer state
-			return new TestingListState<>();
-		}
-
-		// ------------------------------------------------------------------------
-
-		@Override
-		public <S> ListState<S> getOperatorState(ListStateDescriptor<S> stateDescriptor) throws Exception {
-			throw new UnsupportedOperationException();
 		}
 
 		@Override

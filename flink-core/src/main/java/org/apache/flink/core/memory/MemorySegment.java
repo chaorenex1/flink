@@ -271,7 +271,8 @@ public abstract class MemorySegment {
 
 	/**
 	 * Wraps the chunk of the underlying memory located between <tt>offset</tt> and
-	 * <tt>length</tt> in a NIO ByteBuffer.
+	 * <tt>offset + length</tt> in a NIO ByteBuffer. The ByteBuffer has the full segment as capacity
+	 * and the offset and length parameters set the buffers position and limit.
 	 *
 	 * @param offset The offset in the memory segment.
 	 * @param length The number of bytes to be wrapped as a buffer.
@@ -991,7 +992,7 @@ public abstract class MemorySegment {
 	 * @return The long value at the given position.
 	 *
 	 * @throws IndexOutOfBoundsException Thrown, if the index is negative, or larger than the segment
-	 *                                   size minus 8.
+	 *                                   size minus 4.
 	 */
 	public final float getFloatLittleEndian(int index) {
 		return Float.intBitsToFloat(getIntLittleEndian(index));
@@ -1009,7 +1010,7 @@ public abstract class MemorySegment {
 	 * @return The long value at the given position.
 	 *
 	 * @throws IndexOutOfBoundsException Thrown, if the index is negative, or larger than the segment
-	 *                                   size minus 8.
+	 *                                   size minus 4.
 	 */
 	public final float getFloatBigEndian(int index) {
 		return Float.intBitsToFloat(getIntBigEndian(index));
@@ -1045,7 +1046,7 @@ public abstract class MemorySegment {
 	 * @param value The long value to be written.
 	 *
 	 * @throws IndexOutOfBoundsException Thrown, if the index is negative, or larger than the segment
-	 *                                   size minus 8.
+	 *                                   size minus 4.
 	 */
 	public final void putFloatLittleEndian(int index, float value) {
 		putIntLittleEndian(index, Float.floatToRawIntBits(value));
@@ -1063,7 +1064,7 @@ public abstract class MemorySegment {
 	 * @param value The long value to be written.
 	 *
 	 * @throws IndexOutOfBoundsException Thrown, if the index is negative, or larger than the segment
-	 *                                   size minus 8.
+	 *                                   size minus 4.
 	 */
 	public final void putFloatBigEndian(int index, float value) {
 		putIntBigEndian(index, Float.floatToRawIntBits(value));
@@ -1270,6 +1271,50 @@ public abstract class MemorySegment {
 		}
 	}
 
+	/**
+	 * Bulk copy method. Copies {@code numBytes} bytes to target unsafe object and pointer.
+	 * NOTE: This is an unsafe method, no check here, please be careful.
+	 *
+	 * @param offset The position where the bytes are started to be read from in this memory segment.
+	 * @param target The unsafe memory to copy the bytes to.
+	 * @param targetPointer The position in the target unsafe memory to copy the chunk to.
+	 * @param numBytes The number of bytes to copy.
+	 *
+	 * @throws IndexOutOfBoundsException If the source segment does not contain the given number
+	 *           of bytes (starting from offset).
+	 */
+	public final void copyToUnsafe(int offset, Object target, int targetPointer, int numBytes) {
+		final long thisPointer = this.address + offset;
+		if (thisPointer + numBytes > addressLimit) {
+			throw new IndexOutOfBoundsException(
+					String.format("offset=%d, numBytes=%d, address=%d",
+							offset, numBytes, this.address));
+		}
+		UNSAFE.copyMemory(this.heapMemory, thisPointer, target, targetPointer, numBytes);
+	}
+
+	/**
+	 * Bulk copy method. Copies {@code numBytes} bytes from source unsafe object and pointer.
+	 * NOTE: This is an unsafe method, no check here, please be careful.
+	 *
+	 * @param offset The position where the bytes are started to be write in this memory segment.
+	 * @param source The unsafe memory to copy the bytes from.
+	 * @param sourcePointer The position in the source unsafe memory to copy the chunk from.
+	 * @param numBytes The number of bytes to copy.
+	 *
+	 * @throws IndexOutOfBoundsException If this segment can not contain the given number
+	 *           of bytes (starting from offset).
+	 */
+	public final void copyFromUnsafe(int offset, Object source, int sourcePointer, int numBytes) {
+		final long thisPointer = this.address + offset;
+		if (thisPointer + numBytes > addressLimit) {
+			throw new IndexOutOfBoundsException(
+					String.format("offset=%d, numBytes=%d, address=%d",
+							offset, numBytes, this.address));
+		}
+		UNSAFE.copyMemory(source, sourcePointer, this.heapMemory, thisPointer, numBytes);
+	}
+
 	// -------------------------------------------------------------------------
 	//                      Comparisons & Swapping
 	// -------------------------------------------------------------------------
@@ -1312,6 +1357,23 @@ public abstract class MemorySegment {
 	}
 
 	/**
+	 * Compares two memory segment regions with different length.
+	 *
+	 * @param seg2 Segment to compare this segment with
+	 * @param offset1 Offset of this segment to start comparing
+	 * @param offset2 Offset of seg2 to start comparing
+	 * @param len1 Length of this memory region to compare
+	 * @param len2 Length of seg2 to compare
+	 *
+	 * @return 0 if equal, -1 if seg1 &lt; seg2, 1 otherwise
+	 */
+	public final int compare(MemorySegment seg2, int offset1, int offset2, int len1, int len2) {
+		final int minLength = Math.min(len1, len2);
+		int c = compare(seg2, offset1, offset2, minLength);
+		return c == 0 ? (len1 - len2) : c;
+	}
+
+	/**
 	 * Swaps bytes between two memory segments, using the given auxiliary buffer.
 	 *
 	 * @param tempBuffer The auxiliary buffer in which to put data during triangle swap.
@@ -1348,5 +1410,46 @@ public abstract class MemorySegment {
 		throw new IndexOutOfBoundsException(
 					String.format("offset1=%d, offset2=%d, len=%d, bufferSize=%d, address1=%d, address2=%d",
 							offset1, offset2, len, tempBuffer.length, this.address, seg2.address));
+	}
+
+	/**
+	 * Equals two memory segment regions.
+	 *
+	 * @param seg2 Segment to equal this segment with
+	 * @param offset1 Offset of this segment to start equaling
+	 * @param offset2 Offset of seg2 to start equaling
+	 * @param length Length of the equaled memory region
+	 *
+	 * @return true if equal, false otherwise
+	 */
+	public final boolean equalTo(MemorySegment seg2, int offset1, int offset2, int length) {
+		int i = 0;
+
+		// we assume unaligned accesses are supported.
+		// Compare 8 bytes at a time.
+		while (i <= length - 8) {
+			if (getLong(offset1 + i) != seg2.getLong(offset2 + i)) {
+				return false;
+			}
+			i += 8;
+		}
+
+		// cover the last (length % 8) elements.
+		while (i < length) {
+			if (get(offset1 + i) != seg2.get(offset2 + i)) {
+				return false;
+			}
+			i += 1;
+		}
+
+		return true;
+	}
+
+	/**
+	 * Get the heap byte array object.
+	 * @return Return non-null if the memory is on the heap, and return null if the memory if off the heap.
+	 */
+	public byte[] getHeapMemory() {
+		return heapMemory;
 	}
 }

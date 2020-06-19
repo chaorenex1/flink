@@ -19,9 +19,9 @@
 package org.apache.flink.table.api.batch.table.validation
 
 import org.apache.flink.api.scala._
-import org.apache.flink.table.api.ValidationException
-import org.apache.flink.table.api.scala._
+import org.apache.flink.table.api._
 import org.apache.flink.table.utils.{TableFunc1, TableTestBase}
+
 import org.junit.Test
 
 class CorrelateValidationTest extends TableTestBase {
@@ -37,7 +37,7 @@ class CorrelateValidationTest extends TableTestBase {
     val table = util.addTable[(Int, Long, String)]("MyTable", 'a, 'b, 'c)
     val function = util.addFunction("func1", new TableFunc1)
     val result = table
-      .leftOuterJoin(function('c) as 's, 'c === 's)
+      .leftOuterJoinLateral(function('c) as 's, 'c === 's)
       .select('c, 's)
     util.verifyTable(result, "")
   }

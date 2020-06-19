@@ -31,7 +31,7 @@ import java.io.IOException;
  *
  * @param <C> The component type.
  */
-public final class GenericArraySerializerSnapshot<C> extends CompositeTypeSerializerSnapshot<C[], GenericArraySerializer> {
+public final class GenericArraySerializerSnapshot<C> extends CompositeTypeSerializerSnapshot<C[], GenericArraySerializer<C>> {
 
 	private static final int CURRENT_VERSION = 1;
 
@@ -56,6 +56,7 @@ public final class GenericArraySerializerSnapshot<C> extends CompositeTypeSerial
 	 * Constructor that the legacy {@link GenericArraySerializerConfigSnapshot} uses
 	 * to delegate compatibility checks to this class.
 	 */
+	@SuppressWarnings("deprecation")
 	GenericArraySerializerSnapshot(Class<C> componentClass) {
 		super(GenericArraySerializer.class);
 		this.componentClass = componentClass;
@@ -77,19 +78,21 @@ public final class GenericArraySerializerSnapshot<C> extends CompositeTypeSerial
 	}
 
 	@Override
-	protected boolean isOuterSnapshotCompatible(GenericArraySerializer newSerializer) {
-		return this.componentClass == newSerializer.getComponentClass();
+	protected OuterSchemaCompatibility resolveOuterSchemaCompatibility(GenericArraySerializer<C> newSerializer) {
+		return (this.componentClass == newSerializer.getComponentClass())
+			? OuterSchemaCompatibility.COMPATIBLE_AS_IS
+			: OuterSchemaCompatibility.INCOMPATIBLE;
 	}
 
 	@Override
-	protected GenericArraySerializer createOuterSerializerWithNestedSerializers(TypeSerializer<?>[] nestedSerializers) {
+	protected GenericArraySerializer<C> createOuterSerializerWithNestedSerializers(TypeSerializer<?>[] nestedSerializers) {
 		@SuppressWarnings("unchecked")
 		TypeSerializer<C> componentSerializer = (TypeSerializer<C>) nestedSerializers[0];
 		return new GenericArraySerializer<>(componentClass, componentSerializer);
 	}
 
 	@Override
-	protected TypeSerializer<?>[] getNestedSerializers(GenericArraySerializer outerSerializer) {
+	protected TypeSerializer<?>[] getNestedSerializers(GenericArraySerializer<C> outerSerializer) {
 		return new TypeSerializer<?>[] { outerSerializer.getComponentSerializer() };
 	}
 }

@@ -18,17 +18,18 @@
 
 package org.apache.flink.table.expressions
 
-import java.sql.Date
-
-import org.apache.flink.table.api.Types
-import org.apache.flink.table.api.scala._
+import org.apache.flink.table.api._
 import org.apache.flink.table.expressions.utils.ArrayTypeTestBase
+
 import org.junit.Test
+
+import java.sql.Date
 
 class ArrayTypeTest extends ArrayTypeTestBase {
 
   @Test
   def testArrayLiterals(): Unit = {
+
     // primitive literals
     testAllApis(array(1, 2, 3), "array(1, 2, 3)", "ARRAY[1, 2, 3]", "[1, 2, 3]")
 
@@ -54,14 +55,14 @@ class ArrayTypeTest extends ArrayTypeTestBase {
       "[2, 9]")
 
     testAllApis(
-      array(Null(Types.INT), 1),
-      "array(Null(INT), 1)",
+      array(nullOf(Types.INT), 1),
+      "array(nullOf(INT), 1)",
       "ARRAY[NULLIF(1,1), 1]",
       "[null, 1]")
 
     testAllApis(
-      array(array(Null(Types.INT), 1)),
-      "array(array(Null(INT), 1))",
+      array(array(nullOf(Types.INT), 1)),
+      "array(array(nullOf(INT), 1))",
       "ARRAY[ARRAY[NULLIF(1,1), 1]]",
       "[[null, 1]]")
 
