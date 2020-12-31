@@ -146,12 +146,12 @@ applications need to use a `StreamExecutionEnvironment`.
 
 The DataStream API calls made in your application build a job graph that is attached to the
 `StreamExecutionEnvironment`. When `env.execute()` is called this graph is packaged up and sent to
-the Flink Master, which parallelizes the job and distributes slices of it to the Task Managers for
+the JobManager, which parallelizes the job and distributes slices of it to the Task Managers for
 execution. Each parallel slice of your job will be executed in a *task slot*.
 
 Note that if you don't call execute(), your application won't be run.
 
-<img src="{{ site.baseurl }}/fig/distributed-runtime.svg" alt="Flink runtime: client, job manager, task managers" class="offset" width="80%" />
+<img src="{% link /fig/distributed-runtime.svg %}" alt="Flink runtime: client, job manager, task managers" class="offset" width="80%" />
 
 This distributed runtime depends on your application being serializable. It also requires that all
 dependencies are available to each node in the cluster.
@@ -208,7 +208,7 @@ and several pub-sub systems.
 ### Debugging
 
 In production, your application will run in a remote cluster or set of containers. And if it fails,
-it will fail remotely. The Flink Master and Task Manager logs can be very helpful in debugging such
+it will fail remotely. The JobManager and TaskManager logs can be very helpful in debugging such
 failures, but it is much easier to do local debugging inside an IDE, which is something that Flink
 supports. You can set breakpoints, examine local variables, and step through your code. You can also
 step into Flink's code, which can be a great way to learn more about its internals if you are
